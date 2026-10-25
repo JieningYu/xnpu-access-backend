@@ -1,0 +1,14 @@
+[package]
+name = "xnpu-access-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net"] }
+serde = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+russh-extra = "0.1"
+tracing = "0.1"
+toml = "1"
