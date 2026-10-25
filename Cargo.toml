@@ -11,4 +11,3 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 russh-extra = "0.1"
 tracing = "0.1"
-toml = "1"
