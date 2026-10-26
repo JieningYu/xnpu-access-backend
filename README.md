@@ -43,8 +43,19 @@ closes the WebSocket when the command finishes.
 id=$(curl -s -X POST --data-binary 'Write hello world in Rust.' \
   http://localhost:3000/)
 
-websocat "ws://localhost:3000/ws/$id"
+curl --no-buffer "ws://localhost:3000/ws/$id"
 ```
+
+## Test mode
+
+Run the API without an SSH host:
+
+```sh
+cargo run -- --test-mode
+```
+
+Each WebSocket returns a short fake response containing the submitted prompt.
+The POST request and WebSocket flow are otherwise unchanged.
 
 ## Notes
 

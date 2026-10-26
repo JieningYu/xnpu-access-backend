@@ -5,9 +5,10 @@ edition = "2024"
 
 [dependencies]
 axum = { version = "0.8", features = ["macros", "ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time"] }
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 russh-extra = "0.1"
 tracing = "0.1"
+tracing-subscriber = "0.3"
