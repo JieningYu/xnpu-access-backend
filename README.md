@@ -37,6 +37,32 @@ ws://localhost:3000/ws/1
 Command stdout is sent as binary WebSocket messages as it arrives. The server
 closes the WebSocket when the command finishes.
 
+Before closing, the server sends one text message containing generation metrics
+found in command stderr:
+
+```json
+{
+  "type": "generation_metrics",
+  "available": true,
+  "prefill": {
+    "tokens": 14,
+    "duration_ms": 1037.0,
+    "tokens_per_second": 13.5
+  },
+  "decode": {
+    "tokens": 50,
+    "duration_ms": 4221.26,
+    "tokens_per_second": 11.84
+  }
+}
+```
+
+If no metrics are reported, `available` is `false`:
+
+```json
+{"type":"generation_metrics","available":false}
+```
+
 - Close code `1011`: command failed or exited without a status.
 - Each request ID can be used once.
 

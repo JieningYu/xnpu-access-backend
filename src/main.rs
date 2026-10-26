@@ -19,7 +19,7 @@ use clap::Parser;
 use russh_extra::{
     Client, ClientKeyboardInteractiveInfo, KeyboardInteractiveReply, Session, russh::ChannelMsg,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
@@ -61,6 +61,8 @@ enum Error {
     Channel(#[from] russh_extra::russh::Error),
     #[error("websocket communication error: {0}")]
     WebSocket(#[from] axum::Error),
+    #[error("metrics serialization error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("missing required SSH option: {0}")]
     MissingSshOption(&'static str),
     #[error("proxy request lock closed")]
@@ -125,6 +127,81 @@ type Context = Arc<ContextInner>;
 #[derive(Deserialize)]
 struct Options {
     len: u32,
+}
+
+const MAX_METRICS_STDERR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Default)]
+struct GenerationMetrics {
+    prefill: Option<PhaseMetrics>,
+    decode: Option<PhaseMetrics>,
+}
+
+#[derive(Debug, Serialize)]
+struct PhaseMetrics {
+    tokens: u64,
+    duration_ms: f64,
+    tokens_per_second: f64,
+}
+
+#[derive(Serialize)]
+struct MetricsEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill: Option<PhaseMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decode: Option<PhaseMetrics>,
+}
+
+fn parse_phase_metrics(line: &str) -> Option<(&'static str, PhaseMetrics)> {
+    let (prefix, details) = line.split_once(" tokens in ")?;
+    let phase = if prefix.trim_start().starts_with("prefill") {
+        "prefill"
+    } else if prefix.trim_start().starts_with("decode") {
+        "decode"
+    } else {
+        return None;
+    };
+
+    let (_, tokens) = prefix.rsplit_once(':')?;
+    let (duration, rate) = details.split_once(" ms")?;
+    let rate = rate.trim().strip_prefix('(')?.strip_suffix(" tok/s)")?;
+
+    Some((
+        phase,
+        PhaseMetrics {
+            tokens: tokens.trim().parse().ok()?,
+            duration_ms: duration.trim().parse().ok()?,
+            tokens_per_second: rate.parse().ok()?,
+        },
+    ))
+}
+
+fn parse_generation_metrics(stderr: &[u8]) -> GenerationMetrics {
+    let mut metrics = GenerationMetrics::default();
+    for line in String::from_utf8_lossy(stderr).lines() {
+        match parse_phase_metrics(line) {
+            Some(("prefill", phase)) => metrics.prefill = Some(phase),
+            Some(("decode", phase)) => metrics.decode = Some(phase),
+            _ => {}
+        }
+    }
+    metrics
+}
+
+async fn send_metrics(socket: &mut WebSocket, metrics: GenerationMetrics) -> Result<(), Error> {
+    let event = MetricsEvent {
+        event_type: "generation_metrics",
+        available: metrics.prefill.is_some() || metrics.decode.is_some(),
+        prefill: metrics.prefill,
+        decode: metrics.decode,
+    };
+    socket
+        .send(Message::Text(serde_json::to_string(&event)?.into()))
+        .await?;
+    Ok(())
 }
 
 async fn submit_request(
@@ -204,6 +281,7 @@ async fn stream_test_response(socket: &mut WebSocket, prompt: &str) -> Result<()
         }
         socket.send(Message::binary(chunk)).await?;
     }
+    send_metrics(socket, GenerationMetrics::default()).await?;
     socket.send(Message::Close(None)).await?;
     Ok(())
 }
@@ -218,6 +296,7 @@ async fn stream_ssh(mut socket: WebSocket, session: &Session, command: &str) -> 
     }
 
     let mut exit_status = None;
+    let mut stderr = Vec::new();
     loop {
         tokio::select! {
             message = socket.recv() => {
@@ -243,10 +322,11 @@ async fn stream_ssh(mut socket: WebSocket, session: &Session, command: &str) -> 
                         }
                     }
                     Some(ChannelMsg::ExtendedData { ext: 1, data }) => {
-                        warn!(
-                            stderr = %String::from_utf8_lossy(&data),
-                            "remote command wrote to stderr"
-                        );
+                        stderr.extend_from_slice(&data);
+                        if stderr.len() > MAX_METRICS_STDERR_BYTES {
+                            let excess = stderr.len() - MAX_METRICS_STDERR_BYTES;
+                            stderr.drain(..excess);
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status: status }) => {
                         exit_status = Some(status);
@@ -261,6 +341,9 @@ async fn stream_ssh(mut socket: WebSocket, session: &Session, command: &str) -> 
             }
         }
     }
+
+    send_metrics(&mut socket, parse_generation_metrics(&stderr)).await?;
+
     let close = match exit_status {
         Some(0) => Message::Close(None),
         Some(status) => {
