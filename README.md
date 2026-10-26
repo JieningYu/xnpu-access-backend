@@ -4,14 +4,17 @@ HTTP API for streaming output over SSH.
 
 ## Request
 
-Submit a prompt with a raw `POST` body:
+Submit a length and prompt with a raw `POST` body. The request length is a
+non-negative integer supplied in the required `len` query parameter:
 
 ```http
-POST /
+POST /?len=1024
 Content-Type: text/plain
 
 Write a hello world program in Rust.
 ```
+
+The `len` value is available to the command as `%i`.
 
 The response is `202 Accepted`. Its body is a one-time request ID, and
 `Location` points to the WebSocket endpoint:
@@ -41,7 +44,7 @@ closes the WebSocket when the command finishes.
 
 ```sh
 id=$(curl -s -X POST --data-binary 'Write hello world in Rust.' \
-  http://localhost:3000/)
+  'http://localhost:3000/?len=1024')
 
 curl --no-buffer "ws://localhost:3000/ws/$id"
 ```
@@ -61,6 +64,7 @@ The POST request and WebSocket flow are otherwise unchanged.
 
 - Start the server against the SSH host using the CLI options shown by
   `xnpu-access-backend --help`.
-- The client prompt replaces `%s` in `--cmd` and is shell-escaped before use.
+- In `--cmd`, `%i` is replaced with the `len` query parameter and `%s` is
+  replaced with the client prompt.
 - HTTP `POST` is used only to submit the prompt; output is delivered over
   WebSocket.

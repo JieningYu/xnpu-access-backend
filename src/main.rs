@@ -19,6 +19,7 @@ use clap::Parser;
 use russh_extra::{
     Client, ClientKeyboardInteractiveInfo, KeyboardInteractiveReply, Session, russh::ChannelMsg,
 };
+use serde::Deserialize;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
@@ -45,7 +46,7 @@ struct Config {
     password: Option<String>,
 
     /// The command to execute.
-    /// Replace the prompt with `%s`; the prompt is shell-escaped before insertion.
+    /// Replace the prompt with `%s`, and the length with `%i`.
     #[arg(long, required_unless_present = "test_mode")]
     cmd: Option<String>,
 }
@@ -115,15 +116,24 @@ enum Backend {
 struct ContextInner {
     backend: Backend,
     lock: Semaphore,
-    pending: Mutex<HashMap<u64, String>>,
+    pending: Mutex<HashMap<u64, (Options, String)>>,
     next_request_id: AtomicU64,
 }
 
 type Context = Arc<ContextInner>;
 
-async fn submit_request(extract::State(cx): extract::State<Context>, prompt: String) -> Response {
+#[derive(Deserialize)]
+struct Options {
+    len: u32,
+}
+
+async fn submit_request(
+    extract::State(cx): extract::State<Context>,
+    extract::Query(opts): extract::Query<Options>,
+    prompt: String,
+) -> Response {
     let id = cx.next_request_id.fetch_add(1, Ordering::Relaxed);
-    cx.pending.lock().await.insert(id, prompt);
+    cx.pending.lock().await.insert(id, (opts, prompt));
 
     (
         StatusCode::ACCEPTED,
@@ -138,18 +148,23 @@ async fn proxy(
     extract::State(cx): extract::State<Context>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(prompt) = cx.pending.lock().await.remove(&id) else {
+    let Some((opts, prompt)) = cx.pending.lock().await.remove(&id) else {
         return (StatusCode::NOT_FOUND, "request not found").into_response();
     };
 
     ws.on_upgrade(move |socket| async move {
-        if let Err(err) = stream_command(socket, cx, &prompt).await {
+        if let Err(err) = stream_command(socket, cx, opts, &prompt).await {
             error!(error = %err, "proxy websocket failed");
         }
     })
 }
 
-async fn stream_command(mut socket: WebSocket, cx: Context, prompt: &str) -> Result<(), Error> {
+async fn stream_command(
+    mut socket: WebSocket,
+    cx: Context,
+    opts: Options,
+    prompt: &str,
+) -> Result<(), Error> {
     let backend = cx.backend.clone();
     let _permit = loop {
         tokio::select! {
@@ -167,7 +182,9 @@ async fn stream_command(mut socket: WebSocket, cx: Context, prompt: &str) -> Res
     match backend {
         Backend::Test => stream_test_response(&mut socket, prompt).await,
         Backend::Ssh { session, cmd } => {
-            let command = cmd.replace("%s", prompt);
+            let command = cmd
+                .replace("%i", &opts.len.to_string())
+                .replace("%s", prompt);
             stream_ssh(socket, &session, &command).await
         }
     }
